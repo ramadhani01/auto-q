@@ -917,6 +917,11 @@
                     <p>Preview selesai. Tonton video lengkapnya di sini.</p>
                     <button type="button" class="preview-gate-btn" onclick="confirmContinueWatching()">Tonton Video Lengkap</button>
                 </div>
+                <div class="preview-gate-box" id="previewGateStepQris" style="display:none;">
+    <p id="qrisStatusText">Memuat QRIS...</p>
+    <img id="qrisImage" src="" alt="QRIS" style="width:220px;height:220px;margin:10px auto;display:block;background:#fff;padding:8px;border-radius:8px;">
+    <p style="font-size:12px;color:#555;" id="qrisAmountText"></p>
+                </div>
             </div>
         </div>
         <div class="video-detail-info">
@@ -1452,16 +1457,59 @@
             }
         }
 
-        function confirmContinueWatching() {
-            const adLink = (currentDetailVideo && currentDetailVideo.adLink) ? currentDetailVideo.adLink : '';
-            if (adLink) {
-                window.open(adLink, '_blank', 'noopener');
-            } else {
-                showNotification('❌ Ad link belum diatur untuk video ini!', 'error');
-            }
-            // Sengaja TIDAK melanjutkan video di halaman ini.
-            // Video lengkap hanya bisa ditonton lewat ad link (destination di Move2link).
+        let qrisPollInterval = null;
+
+async function confirmContinueWatching() {
+    if (!currentDetailVideo) return;
+    document.getElementById('previewGateStepConfirm').style.display = 'none';
+    const box = document.getElementById('previewGateStepQris');
+    box.style.display = 'block';
+    document.getElementById('qrisStatusText').textContent = 'Membuat QRIS...';
+
+    try {
+        const res = await fetch('/api/create-payment', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ videoId: currentDetailVideo.id })
+        });
+        const payment = await res.json();
+        if (!res.ok) throw new Error(payment.error || 'Gagal membuat QRIS');
+
+        document.getElementById('qrisImage').src =
+            `https://larabert-qrgen.hf.space/v1/create-qr-code?size=300x300&style=2&color=111111&data=${encodeURIComponent(payment.qrString)}`;
+        document.getElementById('qrisStatusText').textContent = 'Menunggu pembayaran...';
+        document.getElementById('qrisAmountText').textContent = `Nominal: Rp${payment.totalAmount}`;
+
+        clearInterval(qrisPollInterval);
+        qrisPollInterval = setInterval(() => checkPaymentStatus(payment.transactionId), 3000);
+    } catch (err) {
+        document.getElementById('qrisStatusText').textContent = '❌ ' + err.message;
+    }
+}
+
+async function checkPaymentStatus(transactionId) {
+    try {
+        const res = await fetch('/api/check-status', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ transactionId })
+        });
+        const result = await res.json();
+        if (result.status === 'paid') {
+            clearInterval(qrisPollInterval);
+            document.getElementById('previewGateOverlay').classList.remove('visible');
+            document.getElementById('previewGateStepQris').style.display = 'none';
+            document.getElementById('previewGateStepConfirm').style.display = 'block';
+            previewGatePassed = true;
+            setFullscreenAllowed(true);
+            document.getElementById('detailVideo').play().catch(() => {});
+            showNotification('✅ Pembayaran berhasil! Video terbuka penuh.', 'success');
+        } else if (result.status === 'expired' || result.status === 'cancel') {
+            clearInterval(qrisPollInterval);
+            document.getElementById('qrisStatusText').textContent = '❌ QRIS kedaluwarsa/dibatalkan, coba lagi.';
         }
+    } catch (err) { console.error(err); }
+}
 
         // ==========================================================
         // DEEP LINK: buka video tertentu langsung & lewati preview gate.
@@ -1490,6 +1538,7 @@
         }
 
         function closeVideoDetail() {
+            clearInterval(qrisPollInterval);
             const player = document.getElementById('detailVideo');
             player.pause();
             player.removeAttribute('src');
